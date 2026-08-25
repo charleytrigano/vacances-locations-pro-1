@@ -250,17 +250,14 @@ def _show_whatsapp(df: pd.DataFrame):
         # Utiliser la version traduite si disponible, sinon le message original
         if _trad_key in st.session_state and st.session_state[_trad_key]:
             message = st.session_state[_trad_key]
-        # Aperçu HTML avec image drapeau (fonctionne sur Windows)
+        # Aperçu en texte brut via composant natif Streamlit (garanti lisible,
+        # même rendu que "Message personnalisé" qui fonctionne déjà bien)
         _apercu_html = message_html if "message_html" in dir() else message
         if _trad_key in st.session_state and st.session_state[_trad_key]:
             _apercu_html = st.session_state[_trad_key]
-        st.markdown("**Aperçu :**")
-        st.markdown(
-            f"<div style='background:#F8F9FA;border:1px solid #DEE2E6;border-radius:8px;"
-            f"padding:12px 16px;font-size:13px;white-space:pre-wrap;line-height:1.6'>"
-            f"{_apercu_html.replace(chr(10), '<br>')}</div>",
-            unsafe_allow_html=True
-        )
+        import re as _re_strip
+        _apercu_texte = _re_strip.sub(r"<[^>]+>", "", _apercu_html)
+        st.text_area("Aperçu :", value=_apercu_texte, height=220, disabled=True, key="wa_apercu_readonly")
 
     tel_input = st.text_input("Numéro WhatsApp", value=telephone, placeholder="+33 6 12 34 56 78")
     st.markdown("---")
