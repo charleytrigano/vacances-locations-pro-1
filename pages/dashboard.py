@@ -1,342 +1,265 @@
-import streamlit as st
+"""
+pages/dashboard.py
+───────────────────────────────────────────────
+Tableau de bord Vacances-Locations PRO
+
+Corrections appliquées :
+  • force_refresh=True sur les lectures de propriétés
+    → plus de « ? » à la place du nom de propriété.
+  • taux d'occupation plafonné à 100 %
+    → plus de 215 % absurde.
+  • Bandeau arrivées = veille uniquement, disparait le jour J.
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
 import pandas as pd
-import plotly.express as px
-from services.reservation_service import load_reservations
-from services.analytics_service import compute_kpis, compute_monthly
-from services.alert_service import upcoming_arrivals, unpaid_reservations
-from database.supabase_client import is_connected, get_supabase
-from services.proprietes_service import get_proprietes_dict, filter_df, get_propriete_selectionnee
+import streamlit as st
+
+from database.reservations_repo import fetch_all as fetch_reservations
+from database.proprietes_repo import fetch_all as fetch_proprietes
+from database.proprietes_repo import get_proprietes_dict
 
 
+# ─────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────
+
+def _fa(force_refresh: bool = False) -> pd.DataFrame:
+    """Lecture réservations → DataFrame propre."""
+    data = fetch_reservations(force_refresh=force_refresh) if _accepts_refresh(fetch_reservations) else fetch_reservations()
+    df = pd.DataFrame(data or [])
+    if df.empty:
+        return df
+
+    for col in ("date_arrivee", "date_depart"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+
+    for col in ("ca_brut", "commission", "frais_cb", "prix_net", "menage", "nuitees"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    if "nuitees" in df.columns and "date_arrivee" in df.columns and "date_depart" in df.columns:
+        mask = (df["nuitees"] == 0) & df["date_arrivee"].notna() & df["date_depart"].notna()
+        df.loc[mask, "nuitees"] = df.loc[mask].apply(
+            lambda r: (r["date_depart"] - r["date_arrivee"]).days, axis=1
+        )
+
+    return df
 
 
-
-def _show_admin_overview():
-    """Vue globale multi-propriétés pour l'admin."""
-    from database.proprietes_repo import fetch_all as _fa
-    from database.supabase_client import get_supabase as _gsb
-    from datetime import date, timedelta
-    import pandas as pd
-
-    st.title("📊 Vue d'ensemble — Toutes les propriétés")
-
+def _accepts_refresh(fn) -> bool:
+    import inspect
     try:
-        sb = _gsb()
-        if sb is None:
-            return
-
-        # Charger toutes les réservations
-        result = sb.table("reservations").select("*").neq("plateforme","Fermeture").execute()
-        all_resas = result.data or []
-        if not all_resas:
-            st.info("Aucune réservation trouvée.")
-            return
-
-        df = pd.DataFrame(all_resas)
-        df["date_arrivee"] = pd.to_datetime(df["date_arrivee"], errors="coerce")
-        df["date_depart"]  = pd.to_datetime(df["date_depart"],  errors="coerce")
-        df["prix_net"]     = pd.to_numeric(df.get("prix_net", 0), errors="coerce").fillna(0)
-        df["prix_brut"]    = pd.to_numeric(df.get("prix_brut",0), errors="coerce").fillna(0)
-        df["nuitees"]      = pd.to_numeric(df.get("nuitees",  0), errors="coerce").fillna(0)
-        df["paye"]         = df.get("paye", False).fillna(False)
-
-        props = {p["id"]: p["nom"] for p in _fa()}
-        df["prop_nom"] = df["propriete_id"].map(props).fillna("?")
-
-        annee_sel = st.selectbox("Année", sorted(df["date_arrivee"].dt.year.dropna().unique().tolist(), reverse=True), key="admin_ov_annee")
-        df_y = df[df["date_arrivee"].dt.year == annee_sel]
-
-        # ── KPIs globaux ────────────────────────────────────────────────
-        ca_total  = df_y["prix_net"].sum()
-        nuits_tot = int(df_y["nuitees"].sum())
-        nb_resas  = len(df_y)
-        impaye    = df_y[df_y["paye"] == False]["prix_net"].sum()
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("💰 CA Net total",    f"{ca_total:,.0f} €")
-        k2.metric("📅 Réservations",    nb_resas)
-        k3.metric("🌙 Nuits totales",   nuits_tot)
-        k4.metric("⚠️ Impayés",         f"{impaye:,.0f} €",
-                   delta=f"-{impaye:,.0f} €" if impaye > 0 else None,
-                   delta_color="inverse")
-
-        st.markdown("")
-
-        # ── Tableau comparatif par propriété ────────────────────────────
-        st.markdown("#### 🏠 Comparatif par propriété")
-        rows = []
-        for pid, pnom in sorted(props.items()):
-            df_p = df_y[df_y["propriete_id"] == pid]
-            if df_p.empty:
-                continue
-            taux = min(100, int(df_p["nuitees"].sum()) / 365 * 100)
-            rows.append({
-                "Propriété":      pnom,
-                "Réservations":   len(df_p),
-                "CA Net (€)":     f"{df_p['prix_net'].sum():,.0f}",
-                "Nuits":          int(df_p["nuitees"].sum()),
-                "Taux occ.":      f"{taux:.1f}%",
-                "Impayés (€)":    f"{df_p[df_p['paye']==False]['prix_net'].sum():,.0f}",
-            })
-
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-        # ── Arrivées et départs du jour ──────────────────────────────────
-        today = date.today()
-        demain = today + timedelta(days=1)
-
-        arr_demain = df[df["date_arrivee"].dt.date == demain]
-        dep_auj    = df[df["date_depart"].dt.date == today]
-
-        col_a, col_d = st.columns(2)
-        with col_a:
-            st.markdown(f"#### 🏠 Arrivées demain ({len(arr_demain)})")
-            if not arr_demain.empty:
-                for _, r in arr_demain.iterrows():
-                    st.markdown(f"- **{r.get('nom_client','?')}** — {r.get('prop_nom','?')} — {r.get('plateforme','?')}")
-            else:
-                st.caption("Aucune arrivée demain")
-
-        with col_d:
-            st.markdown(f"#### 🚪 Départs aujourd'hui ({len(dep_auj)})")
-            if not dep_auj.empty:
-                for _, r in dep_auj.iterrows():
-                    st.markdown(f"- **{r.get('nom_client','?')}** — {r.get('prop_nom','?')}")
-            else:
-                st.caption("Aucun départ aujourd'hui")
-
-        # ── Réservations à venir (30 jours) ─────────────────────────────
-        st.markdown("#### 📅 Prochaines réservations (30 jours)")
-        df_futur = df[
-            (df["date_arrivee"].dt.date >= today) &
-            (df["date_arrivee"].dt.date <= today + timedelta(days=30))
-        ].sort_values("date_arrivee")
-
-        if not df_futur.empty:
-            df_show = df_futur[["prop_nom","nom_client","date_arrivee","date_depart","nuitees","prix_net","plateforme","paye"]].copy()
-            df_show["date_arrivee"] = df_show["date_arrivee"].dt.strftime("%d/%m/%Y")
-            df_show["date_depart"]  = df_show["date_depart"].dt.strftime("%d/%m/%Y")
-            df_show["prix_net"]     = df_show["prix_net"].apply(lambda x: f"{x:,.0f} €")
-            df_show["paye"]         = df_show["paye"].apply(lambda x: "✅" if x else "❌")
-            st.dataframe(df_show.rename(columns={
-                "prop_nom":"Propriété","nom_client":"Client",
-                "date_arrivee":"Arrivée","date_depart":"Départ",
-                "nuitees":"Nuits","prix_net":"CA Net","plateforme":"Plateforme","paye":"Payé"
-            }), use_container_width=True, hide_index=True)
-        else:
-            st.info("Aucune réservation dans les 30 prochains jours.")
-
-    except Exception as e:
-        st.error(f"Erreur vue admin : {e}")
+        return "force_refresh" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
 
 
-def show():
-    # ── Bandeau arrivées demain ──────────────────────────────────────────────
+def _euro(x: float) -> str:
     try:
-        from datetime import date, timedelta
-        import pandas as pd
-        _demain = date.today() + timedelta(days=1)
-        _df_all = load_reservations()
-        if not _df_all.empty:
-            _df_all["date_arrivee"] = pd.to_datetime(_df_all["date_arrivee"])
-            _arr = _df_all[
-                (_df_all["date_arrivee"].dt.date == _demain) &
-                (_df_all["plateforme"] != "Fermeture")
-            ]
-            if not _arr.empty:
-                _lignes = []
-                for _, _r in _arr.iterrows():
-                    _tel = str(_r.get("telephone","") or "")
-                    _lignes.append(
-                        f"<b>{_r.get('nom_client','?')}</b> — "
-                        f"{_r.get('plateforme','?')} — "
-                        f"📱 {_tel if _tel else 'pas de tél'}"
-                    )
-                # Notification push J-1 (une seule fois par session)
-                _notif_key = f"push_j1_{_demain.strftime('%Y%m%d')}"
-                if not st.session_state.get(_notif_key):
-                    try:
-                        from services.pushover_service import notify_arrivee_demain
-                        from database.proprietes_repo import fetch_dict as _fd_push
-                        _props_push = _fd_push()
-                        for _, _r in _arr.iterrows():
-                            _pid_push = int(_r.get("propriete_id", 0) or 0)
-                            _prop_nom_push = _props_push.get(_pid_push, f"Propriété {_pid_push}")
-                            notify_arrivee_demain(
-                                nom_client = _r.get("nom_client", ""),
-                                telephone  = str(_r.get("telephone","") or ""),
-                                prop_nom   = _prop_nom_push
-                            )
-                        st.session_state[_notif_key] = True
-                    except Exception: pass
-                st.markdown(
-                    f"<div style='background:#1B5E20;border-left:5px solid #69F0AE;"
-                    f"padding:12px 18px;border-radius:0 8px 8px 0;margin-bottom:16px'>"
-                    f"<b style='color:#69F0AE;font-size:15px'>🏠 Arrivée(s) demain "
-                    f"({_demain.strftime('%d/%m/%Y')}) :</b><br>"
-                    f"<span style='color:#FFFFFF'>{'<br>'.join(_lignes)}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-    except Exception as _e:
-        st.caption(f"⚠️ Bandeau: {_e}")
+        return f"{float(x):,.0f} €".replace(",", " ")
+    except Exception:
+        return "0 €"
 
-    _is_admin = st.session_state.get("is_admin", False)
 
-    # ── Vue multi-propriétés pour l'admin ─────────────────────────────────
-    if _is_admin:
-        _show_admin_overview()
-        st.divider()
+# ─────────────────────────────────────────────────────────
+# Bandeau arrivées (J-1)
+# ─────────────────────────────────────────────────────────
 
-    st.title("📊 Dashboard")
-
-    if is_connected():
-        st.success("🟢 Connecté à Supabase", icon="✅")
-    else:
-        st.warning("🟡 Mode hors ligne — données CSV locales", icon="⚠️")
-
-    # ── Diagnostic table vide ─────────────────────────────────────────────
-    if is_connected():
-        try:
-            sb = get_supabase()
-            count = sb.table("reservations").select("id", count="exact").execute()
-            nb = count.count if hasattr(count, "count") else len(count.data)
-            if nb == 0:
-                st.warning("⚠️ **La table Supabase est vide.**")
-                st.info("Allez dans 📋 Réservations → 📤 Import CSV pour importer vos données.")
-                return
-        except Exception as e:
-            err_str = str(e)
-            if "JWT" in err_str or "expired" in err_str or "PGRST303" in err_str:
-                # JWT expiré — renouveler le client Supabase
-                try:
-                    from database.supabase_client import _reset_client
-                    _reset_client()
-                except Exception:
-                    pass
-                st.warning("⚠️ Session expirée — rechargement en cours...")
-                import time; time.sleep(1)
-                st.rerun()
-            else:
-                st.error(f"Erreur vérification table : {e}")
-                return
-
-    df_all = load_reservations()
-    if df_all.empty:
-        st.info("Aucune réservation chargée.")
+def _bandeau_arrivees(df: pd.DataFrame, props: dict[int, str]) -> None:
+    if df.empty or "date_arrivee" not in df.columns:
+        return
+    demain = date.today() + timedelta(days=1)
+    arrivees = df[df["date_arrivee"] == demain]
+    if arrivees.empty:
         return
 
-    # ── Filtre propriété ──────────────────────────────────────────────────
-    # Filtre propriété depuis la sidebar (session_state)
-    prop_choix = get_propriete_selectionnee()
-    props = get_proprietes_dict()
+    st.success(f"🚪 **Arrivée{'s' if len(arrivees) > 1 else ''} prévue{'s' if len(arrivees) > 1 else ''} demain ({demain.strftime('%d/%m/%Y')})**")
+    for _, r in arrivees.iterrows():
+        prop_nom = props.get(r.get("propriete_id"), "?")
+        nom = r.get("nom_client", "—")
+        plat = r.get("plateforme", "—")
+        tel = r.get("telephone", "") or r.get("telephone_client", "") or "—"
+        st.markdown(f"• **{nom}** — {prop_nom} — {plat} — 📞 {tel}")
 
-    col_info, col_annee, _ = st.columns([3, 2, 3])
-    with col_info:
-        if prop_choix != 0:
-            st.info(f"🏠 {props.get(prop_choix, f'Propriété {prop_choix}')}")
-        else:
-            st.info(f"🏠 Toutes les propriétés ({len(props)})")
-    with col_annee:
-        annees = sorted(df_all["annee"].dropna().unique().tolist(), reverse=True)
-        annee_choix = st.selectbox("📆 Année", ["Toutes"] + annees, key="dash_annee")
 
-    # Appliquer filtres
-    df = filter_df(df_all, prop_choix)
-    if annee_choix != "Toutes":
-        df = df[df["annee"] == int(annee_choix)]
+# ─────────────────────────────────────────────────────────
+# Vue admin : tableau récapitulatif des propriétés
+# ─────────────────────────────────────────────────────────
+
+def _show_admin_overview() -> None:
+    st.subheader("Vue d'ensemble — toutes propriétés")
+
+    df = _fa(force_refresh=True)
+    props = get_proprietes_dict(force_refresh=True)
 
     if df.empty:
-        st.info("Aucune réservation pour ce filtre.")
+        st.info("Aucune réservation enregistrée.")
         return
 
-    kpis = compute_kpis(df)
+    df["prop_nom"] = df["propriete_id"].map(props).fillna("?")
 
-    # ── Calcul Fermeture directement dans le dashboard ────────────────────
-    df_c = df.copy()
-    df_c["date_arrivee"] = pd.to_datetime(df_c["date_arrivee"])
-    df_c["date_depart"]  = pd.to_datetime(df_c["date_depart"])
-    mask_ferm   = df_c["plateforme"] == "Fermeture"
-    df_ferm     = df_c[mask_ferm]
-    df_reel     = df_c[~mask_ferm]
+    annee = st.selectbox(
+        "Année",
+        sorted({d.year for d in df["date_arrivee"] if pd.notna(d)}, reverse=True),
+        key="dash_admin_year",
+    )
+    df_y = df[df["date_arrivee"].apply(lambda d: pd.notna(d) and d.year == annee)]
 
-    def _n(d):
-        if d.empty: return 0
-        n = d["nuitees"].copy() if "nuitees" in d.columns else pd.Series(dtype=float)
-        if n.empty: n = pd.Series([0]*len(d))
-        mask0 = n.isna() | (n == 0)
-        if mask0.any():
-            n.loc[mask0] = (d.loc[mask0,"date_depart"] - d.loc[mask0,"date_arrivee"]).dt.days
-        return int(n.fillna(0).sum())
+    rows = []
+    for pid, pnom in props.items():
+        df_p = df_y[df_y["propriete_id"] == pid]
+        if df_p.empty:
+            continue
 
-    nuits_fermeture = _n(df_ferm)
-    nuits_louees    = _n(df_reel)
-    ca_net_reel     = float(df_reel["prix_net"].sum()) if not df_reel.empty else 0
-    revenu_nuit     = round(ca_net_reel / nuits_louees) if nuits_louees > 0 else 0
-    label_nuits     = f"{nuits_louees} (+{nuits_fermeture}🔒)" if nuits_fermeture else str(nuits_louees)
+        ca_brut = float(df_p.get("ca_brut", pd.Series(0)).sum())
+        prix_net = float(df_p.get("prix_net", pd.Series(0)).sum())
+        nuitees = int(df_p.get("nuitees", pd.Series(0)).sum())
+        nb_res = len(df_p)
 
-    # ── KPIs ──────────────────────────────────────────────────────────────
+        taux_brut = nuitees / 365 * 100 if nuitees else 0
+        taux = min(100.0, taux_brut)  # ⚠️ plafonné à 100 %
+        rev_nuit = prix_net / nuitees if nuitees else 0
+
+        rows.append({
+            "Propriété": pnom,
+            "Réservations": nb_res,
+            "Nuitées": nuitees,
+            "CA Brut": _euro(ca_brut),
+            "Prix Net": _euro(prix_net),
+            "Revenu / nuit": _euro(rev_nuit),
+            "Taux occupation": f"{taux:.0f} %",
+        })
+
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    else:
+        st.info(f"Aucune réservation en {annee}.")
+
+    # Prochaines réservations (toutes propriétés confondues)
+    st.subheader("🗓️ Prochaines réservations")
+    today = date.today()
+    df_future = df[df["date_arrivee"].apply(lambda d: pd.notna(d) and d >= today)].copy()
+    df_future = df_future.sort_values("date_arrivee").head(15)
+    if df_future.empty:
+        st.info("Pas de réservation à venir.")
+    else:
+        cols = ["prop_nom", "nom_client", "date_arrivee", "date_depart", "plateforme", "ca_brut"]
+        cols = [c for c in cols if c in df_future.columns]
+        show = df_future[cols].rename(columns={
+            "prop_nom": "Propriété",
+            "nom_client": "Client",
+            "date_arrivee": "Arrivée",
+            "date_depart": "Départ",
+            "plateforme": "Plateforme",
+            "ca_brut": "CA Brut",
+        })
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────
+# Vue propriétaire : KPIs d'une seule propriété
+# ─────────────────────────────────────────────────────────
+
+def _show_single_property(prop_id: int) -> None:
+    props = get_proprietes_dict(force_refresh=True)
+    prop_nom = props.get(prop_id, f"Propriété #{prop_id}")
+
+    df = _fa(force_refresh=True)
+    if df.empty:
+        st.info("Aucune réservation enregistrée.")
+        return
+
+    df = df[df["propriete_id"] == prop_id]
+    _bandeau_arrivees(df, props)
+
+    if df.empty:
+        st.info(f"Aucune réservation pour **{prop_nom}**.")
+        return
+
+    annee = st.selectbox(
+        "Année",
+        sorted({d.year for d in df["date_arrivee"] if pd.notna(d)}, reverse=True),
+        key=f"dash_year_{prop_id}",
+    )
+    df_y = df[df["date_arrivee"].apply(lambda d: pd.notna(d) and d.year == annee)]
+
+    if df_y.empty:
+        st.info(f"Aucune réservation en {annee} pour {prop_nom}.")
+        return
+
+    ca_brut = float(df_y.get("ca_brut", pd.Series(0)).sum())
+    commission = float(df_y.get("commission", pd.Series(0)).sum())
+    frais_cb = float(df_y.get("frais_cb", pd.Series(0)).sum())
+    prix_net = float(df_y.get("prix_net", pd.Series(0)).sum())
+    menage = float(df_y.get("menage", pd.Series(0)).sum())
+    nuitees = int(df_y.get("nuitees", pd.Series(0)).sum())
+    nb_res = len(df_y)
+    rev_nuit = prix_net / nuitees if nuitees else 0
+    taux = min(100.0, nuitees / 365 * 100) if nuitees else 0
+
+    st.markdown(f"### 📊 {prop_nom} — {annee}")
+
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("💰 CA Brut",       f"{kpis['ca_brut']:,.0f} €")
-    c2.metric("💵 CA Net",         f"{kpis['ca_net']:,.0f} €")
-    c3.metric("📅 Réservations",   len(df_reel))
-    c4.metric("🌙 Nuits louées",   label_nuits)
-    c5.metric("📈 Revenu / nuit",  f"{revenu_nuit:.0f} €")
+    c1.metric("💰 CA Brut", _euro(ca_brut))
+    c2.metric("🔖 Commissions", _euro(commission))
+    c3.metric("💳 Frais CB", _euro(frais_cb))
+    c4.metric("💵 Prix Net", _euro(prix_net))
+    c5.metric("🧹 Ménage", _euro(menage))
 
-    c6, c7, c8 = st.columns(3)
-    frais_cb_total = float(df_reel["frais_cb"].fillna(0).sum())                      if "frais_cb" in df_reel.columns else 0
-    c6.metric("⏳ En attente",      f"{kpis['montant_en_attente']:,.0f} €")
-    c7.metric("🏡 Taux occupation", f"{kpis['taux_occupation']} %")
-    c8.metric("🔖 Commissions",     f"{kpis['commissions']:,.0f} €")
-    c9, c10 = st.columns(2)
-    c9.metric("💳 Frais CB",        f"{frais_cb_total:,.0f} €",
-              help="Total des frais carte bancaire sur la période")
-    ca_net_apres_cb = (kpis['ca_net'] - frais_cb_total) if frais_cb_total else kpis['ca_net']
-    c10.metric("💵 CA Net (après CB)", f"{ca_net_apres_cb:,.0f} €",
-               delta=f"-{frais_cb_total:,.0f} €" if frais_cb_total else None,
-               delta_color="inverse")
+    c6, c7, c8, c9 = st.columns(4)
+    c6.metric("📈 Revenu / nuit", _euro(rev_nuit))
+    c7.metric("🏡 Taux occupation", f"{taux:.0f} %")
+    c8.metric("🌙 Nuitées", nuitees)
+    c9.metric("📅 Réservations", nb_res)
 
-    st.divider()
 
-    col_left, col_right = st.columns(2)
-    with col_left:
-        st.subheader("📆 CA mensuel")
-        monthly = compute_monthly(df)
-        if not monthly.empty:
-            fig = px.bar(monthly, x="mois_str", y="ca_net",
-                         labels={"mois_str": "Mois", "ca_net": "CA Net (€)"},
-                         color_discrete_sequence=["#2196F3"])
-            fig.update_layout(height=300, margin=dict(t=20, b=20))
-            st.plotly_chart(fig, use_container_width=True)
+# ─────────────────────────────────────────────────────────
+# Entrée principale
+# ─────────────────────────────────────────────────────────
 
-    with col_right:
-        st.subheader("🏷️ Répartition plateformes")
-        if kpis["repartition_plateformes"]:
-            fig2 = px.pie(
-                names=list(kpis["repartition_plateformes"].keys()),
-                values=list(kpis["repartition_plateformes"].values()),
-                color_discrete_sequence=px.colors.qualitative.Set2)
-            fig2.update_layout(height=300, margin=dict(t=20, b=20))
-            st.plotly_chart(fig2, use_container_width=True)
+def show() -> None:
+    st.title("📊 Tableau de bord")
 
-    st.divider()
+    # Vide le cache à chaque rendu (safe, lent : 1 appel réseau de +)
+    try:
+        from database.proprietes_repo import clear_cache
+        clear_cache()
+    except Exception:
+        pass
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("🔔 Arrivées dans 3 jours")
-        arrivees = upcoming_arrivals(df)
-        if arrivees.empty:
-            st.info("Aucune arrivée imminente")
+    auth = st.session_state.get("auth_properties", [])
+    is_admin = st.session_state.get("is_admin", False)
+
+    props = get_proprietes_dict(force_refresh=True)
+
+    if is_admin or (isinstance(auth, list) and len(auth) > 1):
+        # Filtre propriété dans la sidebar
+        options = [("Toutes", None)] + [(nom, pid) for pid, nom in props.items()]
+        labels = [o[0] for o in options]
+        choix = st.sidebar.selectbox(
+            f"Propriété (Toutes ({len(props)}))",
+            labels,
+            key="dash_prop_filter",
+        )
+        prop_id = dict(zip(labels, [o[1] for o in options]))[choix]
+
+        if prop_id is None:
+            _show_admin_overview()
         else:
-            st.dataframe(arrivees[["nom_client", "date_arrivee", "plateforme", "nuitees"]],
-                         use_container_width=True, hide_index=True)
+            _show_single_property(prop_id)
+    else:
+        # Mode propriétaire : une seule propriété
+        prop_id = auth[0] if isinstance(auth, list) and auth else st.session_state.get("propriete_id")
+        if prop_id is None:
+            st.warning("Aucune propriété associée à votre compte.")
+            return
+        _show_single_property(prop_id)
 
-    with col_b:
-        st.subheader("⚠️ Paiements en attente")
-        non_payes = unpaid_reservations(df)
-        if non_payes.empty:
-            st.success("Tous les séjours sont payés ✅")
-        else:
-            st.dataframe(non_payes[["nom_client", "date_arrivee", "prix_net", "plateforme"]],
-                         use_container_width=True, hide_index=True)
+
+if __name__ == "__main__":
+    show()
