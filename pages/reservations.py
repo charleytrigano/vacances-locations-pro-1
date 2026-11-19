@@ -54,6 +54,60 @@ def show():
 # TAB 1 : LISTE
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _euro(x) -> str:
+    try:
+        return f"{float(x):,.0f} €".replace(",", " ")
+    except Exception:
+        return "0 €"
+
+
+def _show_kpis(df: pd.DataFrame, annee: int | None = None) -> None:
+    """Affiche les KPIs calculés depuis le DataFrame filtré."""
+    if df.empty:
+        return
+
+    nb_res = len(df)
+    nb_props = df["propriete_id"].nunique() if "propriete_id" in df.columns else 1
+
+    def _s(col: str) -> float:
+        if col not in df.columns:
+            return 0.0
+        return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum())
+
+    ca_brut = _s("prix_brut") or _s("ca_brut")
+    commission = _s("commissions") or _s("commission")
+    frais_cb = _s("frais_cb")
+    prix_net = _s("prix_net")
+    menage = _s("menage")
+    nuitees = int(_s("nuitees"))
+    rev_nuit = prix_net / nuitees if nuitees else 0
+
+    # Taux d'occupation : nuitées / (365 × nb propriétés) si année fixée, sinon moyenne grossière
+    if annee and nb_props > 0:
+        taux = min(100.0, nuitees / (365 * nb_props) * 100)
+    else:
+        taux = 0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📅 Réservations", nb_res)
+    c2.metric("🌙 Nuitées", nuitees)
+    c3.metric("💰 CA Brut", _euro(ca_brut))
+    c4.metric("💵 Prix Net", _euro(prix_net))
+    c5.metric("📈 Revenu / nuit", _euro(rev_nuit))
+
+    c6, c7, c8, c9, c10 = st.columns(5)
+    c6.metric("🔖 Commissions", _euro(commission))
+    c7.metric("💳 Frais CB", _euro(frais_cb))
+    c8.metric("🧹 Ménage", _euro(menage))
+    if annee:
+        c9.metric("🏡 Taux occupation", f"{taux:.0f} %")
+    else:
+        c9.metric("🏠 Propriétés", nb_props)
+    c10.metric("💶 Panier moyen", _euro(ca_brut / nb_res) if nb_res else "0 €")
+
+    st.divider()
+
+
 def _show_liste():
     df = load_reservations()
     if df.empty:
@@ -110,6 +164,9 @@ def _show_liste():
         prop_id = next((k for k, v in _props.items() if v == prop_choix), None)
         if prop_id:
             df = df[df["propriete_id"] == prop_id]
+
+    # ─── KPIs (calculés sur le df filtré) ─────────────────────────────────
+    _show_kpis(df, annee if annee != "Toutes" else None)
 
     cols = [c for c in COLONNES_AFFICHAGE if c in df.columns]
     st.markdown(f"**{len(df)} réservation(s)**")
