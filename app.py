@@ -502,26 +502,35 @@ import streamlit.components.v1 as _cv
 _sess_html = _cv.html("""
 <script>
 (function() {
-    var params = new URLSearchParams(window.location.search);
-    // Si logout demandé, effacer et ne rien restaurer
-    if (params.get('logout') === '1') {
-        localStorage.removeItem('vlp_session');
-        var cleanUrl = window.location.origin + window.location.pathname;
-        window.location.replace(cleanUrl);
-        return;
-    }
-    var s = localStorage.getItem('vlp_session');
-    if (s) {
-        var current = new URL(window.location.href);
-        if (!current.searchParams.get('vlp_restore')) {
-            current.searchParams.set('vlp_restore', encodeURIComponent(s));
-            window.location.replace(current.toString());
+    // Cibler la fenêtre principale (pas l'iframe du composant)
+    var top = window.top || window.parent || window;
+    try {
+        var topLoc = top.location;
+        var params = new URLSearchParams(topLoc.search);
+        // Si logout demandé, effacer et ne rien restaurer
+        if (params.get('logout') === '1') {
+            try { top.localStorage.removeItem('vlp_session'); } catch(e) {}
+            var cleanUrl = topLoc.origin + topLoc.pathname;
+            topLoc.replace(cleanUrl);
+            return;
         }
+        var s = null;
+        try { s = top.localStorage.getItem('vlp_session'); } catch(e) {}
+        if (s) {
+            var current = new URL(topLoc.href);
+            if (!current.searchParams.get('vlp_restore')) {
+                current.searchParams.set('vlp_restore', encodeURIComponent(s));
+                topLoc.replace(current.toString());
+            }
+        }
+    } catch(e) {
+        // En dernier recours, tentative dans l'iframe
+        console.warn('vlp session: cannot access top window', e);
     }
     // Écouter le logout via message (fallback)
     window.addEventListener('message', function(e) {
         if (e.data === 'vlp_logout') {
-            localStorage.removeItem('vlp_session');
+            try { (window.top || window).localStorage.removeItem('vlp_session'); } catch(_) {}
         }
     });
 })();

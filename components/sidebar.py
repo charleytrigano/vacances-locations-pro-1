@@ -295,15 +295,22 @@ def sidebar() -> str:
             # 1. Vider la session Python
             from services.auth_service import logout
             logout()
-            # 2. Forcer le navigateur à recharger avec ?logout=1
-            #    Le script de restore dans app.py effacera le localStorage
-            #    et redirigera vers l'URL propre, évitant ainsi la restauration.
+            # 2. Forcer le navigateur à recharger avec ?logout=1 sur la FENÊTRE PRINCIPALE
+            #    (components.v1.html tourne dans un iframe, il faut cibler window.top)
             import streamlit.components.v1 as _cv_logout
             _cv_logout.html("""
             <script>
-            localStorage.removeItem('vlp_session');
-            var url = window.location.origin + window.location.pathname + '?logout=1';
-            window.location.replace(url);
+            (function(){
+                var top = window.top || window.parent || window;
+                try { top.localStorage.removeItem('vlp_session'); } catch(e) {}
+                try {
+                    var url = top.location.origin + top.location.pathname + '?logout=1';
+                    top.location.replace(url);
+                } catch(e) {
+                    // Fallback : rechargement direct dans l'iframe (pire cas)
+                    window.location.replace(window.location.origin + '/?logout=1');
+                }
+            })();
             </script>
             """, height=0)
             st.stop()
