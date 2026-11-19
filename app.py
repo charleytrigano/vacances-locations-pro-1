@@ -494,56 +494,33 @@ def _show_splash_login():
     st.markdown("""<div style='text-align:center;margin-top:2.5rem;color:#AAAAAA;font-size:0.78rem'>Développé par <strong>Charley Trigano</strong> — 2026<br><span style='font-size:0.72rem'>© Tous droits réservés</span></div>""", unsafe_allow_html=True)
     st.stop()
 
-# ── Gestion session persistante via localStorage (JS) ────────────────────────
+# ── Session : plus de persistance localStorage automatique ───────────────────
+# (approche désactivée car Streamlit Cloud bloque le JS cross-origin,
+#  rendant la déconnexion peu fiable. L'utilisateur se reconnecte à chaque
+#  chargement — acceptable pour un back-office à usage interne.)
 import json as _json
 import streamlit.components.v1 as _cv
 
-# Lire la session sauvegardée depuis localStorage
-_sess_html = _cv.html("""
-<script>
-(function() {
-    // Cibler la fenêtre principale (pas l'iframe du composant)
-    var top = window.top || window.parent || window;
-    try {
-        var topLoc = top.location;
-        var params = new URLSearchParams(topLoc.search);
-        // Si logout demandé, effacer et ne rien restaurer
-        if (params.get('logout') === '1') {
-            try { top.localStorage.removeItem('vlp_session'); } catch(e) {}
-            var cleanUrl = topLoc.origin + topLoc.pathname;
-            topLoc.replace(cleanUrl);
-            return;
-        }
-        var s = null;
-        try { s = top.localStorage.getItem('vlp_session'); } catch(e) {}
-        if (s) {
-            var current = new URL(topLoc.href);
-            if (!current.searchParams.get('vlp_restore')) {
-                current.searchParams.set('vlp_restore', encodeURIComponent(s));
-                topLoc.replace(current.toString());
-            }
-        }
-    } catch(e) {
-        // En dernier recours, tentative dans l'iframe
-        console.warn('vlp session: cannot access top window', e);
-    }
-    // Écouter le logout via message (fallback)
-    window.addEventListener('message', function(e) {
-        if (e.data === 'vlp_logout') {
-            try { (window.top || window).localStorage.removeItem('vlp_session'); } catch(_) {}
-        }
-    });
-})();
-</script>
-""", height=0)
-
-# Restaurer depuis query param
+# Nettoyer les restes éventuels : ?vlp_restore dans l'URL ou localStorage
 _qp2 = st.query_params
-_restore = _qp2.get("vlp_restore", "")
-if _restore and not st.session_state.get("global_logged_in"):
+if _qp2.get("vlp_restore"):
+    _qp2.clear()
+    st.rerun()
+
+# Injecter un JS discret qui vide le localStorage à chaque chargement du splash
+# (pour nettoyer d'anciennes sessions qui pourraient encore trainer)
+if not st.session_state.get("global_logged_in"):
+    _cv.html("""
+    <script>
+    try { (window.top || window.parent || window).localStorage.removeItem('vlp_session'); } catch(e) {}
+    </script>
+    """, height=0)
+
+# (bloc historique supprimé : plus de restauration automatique)
+if False:  # désactivé
     try:
         import urllib.parse
-        _sess = _json.loads(urllib.parse.unquote(_restore))
+        _sess = _json.loads("{}")
         st.session_state["global_logged_in"]  = True
         st.session_state["is_admin"]          = _sess.get("is_admin", False)
         st.session_state["user_role"]         = _sess.get("user_role", "proprietaire")
@@ -645,84 +622,21 @@ if st.session_state.get("demo_capture_show"):
 
 # ── Détection d'une déconnexion demandée (?logout=1 dans l'URL) ───────────────
 if st.query_params.get("logout") == "1":
-    # 1. Vider toute la session Python
+    # Vider toute la session Python
     try:
         from services.auth_service import logout as _logout_now
         _logout_now()
     except Exception:
         for _k in list(st.session_state.keys()):
             del st.session_state[_k]
-
-    # 2. Afficher un écran de déconnexion clair avec bouton manuel de secours
-    st.markdown("""
-    <div style='text-align:center;padding:4rem 2rem;max-width:500px;margin:0 auto'>
-      <div style='font-size:64px'>🚪</div>
-      <h2 style='color:#1565C0;margin:1rem 0'>Déconnexion en cours...</h2>
-      <p style='color:#666'>Vous allez être redirigé vers l'écran de connexion.</p>
-      <p style='color:#999;font-size:0.85rem;margin-top:2rem'>
-        Si rien ne se passe dans 3 secondes, cliquez sur le bouton ci-dessous.
-      </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 3. Multi-tentatives JavaScript : window.top, puis window.parent, puis window
-    import streamlit.components.v1 as _cv_logout
-    _cv_logout.html("""
-    <div style='background:#E3F2FD;padding:12px;border-radius:8px;text-align:center'>
-      <a href='javascript:void(0)' onclick='doLogout()'
-         style='display:inline-block;background:#1565C0;color:white;
-                padding:10px 24px;border-radius:6px;text-decoration:none;
-                font-weight:600'>↻ Recharger maintenant</a>
-    </div>
-    <script>
-    function doLogout(){
-        var targets = [];
-        try { targets.push(window.top); } catch(e) {}
-        try { targets.push(window.parent); } catch(e) {}
-        targets.push(window);
-        // Vider le localStorage sur toutes les cibles possibles
-        for (var i = 0; i < targets.length; i++) {
-            try { targets[i].localStorage.removeItem('vlp_session'); } catch(e) {}
-        }
-        // Rediriger
-        var base = null;
-        try { base = window.top.location.origin + window.top.location.pathname; }
-        catch(e) {
-            try { base = window.parent.location.origin + window.parent.location.pathname; }
-            catch(e2) { base = '/'; }
-        }
-        try { window.top.location.replace(base); }
-        catch(e) {
-            try { window.parent.location.replace(base); }
-            catch(e2) { window.location.replace(base); }
-        }
-    }
-    // Déclencher automatiquement
-    setTimeout(doLogout, 300);
-    </script>
-    """, height=80)
-    st.stop()
+    # Retirer le flag logout de l'URL puis rerun → tombera sur le splash
+    st.query_params.clear()
+    st.rerun()
 
 if not st.session_state.get("global_logged_in", False):
     _show_splash_login()
 
-# ── Sauvegarder la session dans localStorage après connexion ──────────────────
-if st.session_state.get("global_logged_in"):
-    _unlocked = {k: v for k, v in st.session_state.items() if k.startswith("unlocked_")}
-    _sess_data = _json.dumps({
-        "is_admin":       st.session_state.get("is_admin", False),
-        "user_role":      st.session_state.get("user_role", "proprietaire"),
-        "prop_id":        st.session_state.get("prop_id", 0),
-        "auth_user_id":   st.session_state.get("auth_user_id", ""),
-        "auth_user_email":st.session_state.get("auth_user_email", ""),
-        "unlocked":       _unlocked,
-    })
-    import urllib.parse as _up
-    _cv.html(f"""
-    <script>
-    localStorage.setItem('vlp_session', {_json.dumps(_sess_data)});
-    </script>
-    """, height=0)
+# ── (Sauvegarde localStorage désactivée — voir plus haut) ────────────────────
 
 # ── Imports pages ─────────────────────────────────────────────────────────────
 from pages import dashboard, reservations, calendar, analytics, gaps
