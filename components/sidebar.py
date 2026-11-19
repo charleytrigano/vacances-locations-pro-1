@@ -292,19 +292,21 @@ def sidebar() -> str:
             )
         # Bouton déconnexion visible pour TOUS (mode PIN ou email)
         if st.button("🚪 Déconnexion", key="btn_logout", use_container_width=True):
-            # Effacer localStorage via JS
+            # 1. Vider la session Python
+            from services.auth_service import logout
+            logout()
+            # 2. Forcer le navigateur à recharger avec ?logout=1
+            #    Le script de restore dans app.py effacera le localStorage
+            #    et redirigera vers l'URL propre, évitant ainsi la restauration.
             import streamlit.components.v1 as _cv_logout
             _cv_logout.html("""
             <script>
             localStorage.removeItem('vlp_session');
-            // Nettoyer l'URL de tout paramètre de session
-            var url = window.location.origin + window.location.pathname;
+            var url = window.location.origin + window.location.pathname + '?logout=1';
             window.location.replace(url);
             </script>
             """, height=0)
-            from services.auth_service import logout
-            logout()
-            st.rerun()
+            st.stop()
         # ── Mouchard sessions actives (admin only) ──────────────────
         if st.session_state.get("is_admin", False):
             try:

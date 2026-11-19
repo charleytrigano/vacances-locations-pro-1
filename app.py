@@ -502,16 +502,23 @@ import streamlit.components.v1 as _cv
 _sess_html = _cv.html("""
 <script>
 (function() {
+    var params = new URLSearchParams(window.location.search);
+    // Si logout demandé, effacer et ne rien restaurer
+    if (params.get('logout') === '1') {
+        localStorage.removeItem('vlp_session');
+        var cleanUrl = window.location.origin + window.location.pathname;
+        window.location.replace(cleanUrl);
+        return;
+    }
     var s = localStorage.getItem('vlp_session');
     if (s) {
-        // Envoyer via URL query param pour que Python puisse lire
         var current = new URL(window.location.href);
         if (!current.searchParams.get('vlp_restore')) {
             current.searchParams.set('vlp_restore', encodeURIComponent(s));
             window.location.replace(current.toString());
         }
     }
-    // Écouter le logout
+    // Écouter le logout via message (fallback)
     window.addEventListener('message', function(e) {
         if (e.data === 'vlp_logout') {
             localStorage.removeItem('vlp_session');
