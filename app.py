@@ -643,6 +643,66 @@ if st.session_state.get("demo_capture_show"):
         st.rerun()
     st.stop()
 
+# ── Détection d'une déconnexion demandée (?logout=1 dans l'URL) ───────────────
+if st.query_params.get("logout") == "1":
+    # 1. Vider toute la session Python
+    try:
+        from services.auth_service import logout as _logout_now
+        _logout_now()
+    except Exception:
+        for _k in list(st.session_state.keys()):
+            del st.session_state[_k]
+
+    # 2. Afficher un écran de déconnexion clair avec bouton manuel de secours
+    st.markdown("""
+    <div style='text-align:center;padding:4rem 2rem;max-width:500px;margin:0 auto'>
+      <div style='font-size:64px'>🚪</div>
+      <h2 style='color:#1565C0;margin:1rem 0'>Déconnexion en cours...</h2>
+      <p style='color:#666'>Vous allez être redirigé vers l'écran de connexion.</p>
+      <p style='color:#999;font-size:0.85rem;margin-top:2rem'>
+        Si rien ne se passe dans 3 secondes, cliquez sur le bouton ci-dessous.
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 3. Multi-tentatives JavaScript : window.top, puis window.parent, puis window
+    import streamlit.components.v1 as _cv_logout
+    _cv_logout.html("""
+    <div style='background:#E3F2FD;padding:12px;border-radius:8px;text-align:center'>
+      <a href='javascript:void(0)' onclick='doLogout()'
+         style='display:inline-block;background:#1565C0;color:white;
+                padding:10px 24px;border-radius:6px;text-decoration:none;
+                font-weight:600'>↻ Recharger maintenant</a>
+    </div>
+    <script>
+    function doLogout(){
+        var targets = [];
+        try { targets.push(window.top); } catch(e) {}
+        try { targets.push(window.parent); } catch(e) {}
+        targets.push(window);
+        // Vider le localStorage sur toutes les cibles possibles
+        for (var i = 0; i < targets.length; i++) {
+            try { targets[i].localStorage.removeItem('vlp_session'); } catch(e) {}
+        }
+        // Rediriger
+        var base = null;
+        try { base = window.top.location.origin + window.top.location.pathname; }
+        catch(e) {
+            try { base = window.parent.location.origin + window.parent.location.pathname; }
+            catch(e2) { base = '/'; }
+        }
+        try { window.top.location.replace(base); }
+        catch(e) {
+            try { window.parent.location.replace(base); }
+            catch(e2) { window.location.replace(base); }
+        }
+    }
+    // Déclencher automatiquement
+    setTimeout(doLogout, 300);
+    </script>
+    """, height=80)
+    st.stop()
+
 if not st.session_state.get("global_logged_in", False):
     _show_splash_login()
 

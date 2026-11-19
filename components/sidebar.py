@@ -292,28 +292,11 @@ def sidebar() -> str:
             )
         # Bouton déconnexion visible pour TOUS (mode PIN ou email)
         if st.button("🚪 Déconnexion", key="btn_logout", use_container_width=True):
-            # 1. Vider la session Python
-            from services.auth_service import logout
-            logout()
-            # 2. Forcer le navigateur à recharger avec ?logout=1 sur la FENÊTRE PRINCIPALE
-            #    (components.v1.html tourne dans un iframe, il faut cibler window.top)
-            import streamlit.components.v1 as _cv_logout
-            _cv_logout.html("""
-            <script>
-            (function(){
-                var top = window.top || window.parent || window;
-                try { top.localStorage.removeItem('vlp_session'); } catch(e) {}
-                try {
-                    var url = top.location.origin + top.location.pathname + '?logout=1';
-                    top.location.replace(url);
-                } catch(e) {
-                    // Fallback : rechargement direct dans l'iframe (pire cas)
-                    window.location.replace(window.location.origin + '/?logout=1');
-                }
-            })();
-            </script>
-            """, height=0)
-            st.stop()
+            # Set le flag ?logout=1 dans l'URL, puis rerun.
+            # app.py (au début) détectera ce flag et fera la vraie déconnexion
+            # avec écran visible + bouton manuel de secours.
+            st.query_params["logout"] = "1"
+            st.rerun()
         # ── Mouchard sessions actives (admin only) ──────────────────
         if st.session_state.get("is_admin", False):
             try:
