@@ -140,6 +140,86 @@ def show():
                 st.error(f"❌ Erreur : {e}")
 
     st.divider()
+
+    # ═════════════════════════════════════════════════════════════════════
+    # SECTION 4 — Télécharger le code source (scripts GitHub)
+    # ═════════════════════════════════════════════════════════════════════
+    st.subheader("📥 Télécharger le code source complet")
+    st.caption("Récupère tous les scripts GitHub (code de l'app + workflows + backups) "
+               "pour les stocker en local. À faire après chaque mise à jour majeure.")
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.link_button(
+            "⬇️ Télécharger le ZIP complet (code + data)",
+            url="https://github.com/charleytrigano/vacances-locations-pro-1/archive/refs/heads/main.zip",
+            use_container_width=True,
+            type="primary",
+        )
+        st.caption("🎯 À sauvegarder dans : `D:\\LODGEPRO\\Scripts github`")
+
+    with col_b:
+        # Fournir le script de sync Windows
+        sync_script = r'''@echo off
+REM ═══════════════════════════════════════════════════════════════
+REM Sync LodgePro — clone ou met à jour le code dans D:\LODGEPRO\Scripts github
+REM A executer manuellement ou planifier avec le Planificateur de taches Windows
+REM ═══════════════════════════════════════════════════════════════
+
+set DEST=D:\LODGEPRO\Scripts github
+set REPO=https://github.com/charleytrigano/vacances-locations-pro-1.git
+
+echo.
+echo === Synchronisation LodgePro vers %DEST% ===
+echo.
+
+if not exist "%DEST%" (
+    echo Premiere synchronisation : clonage du repo...
+    git clone %REPO% "%DEST%"
+) else (
+    echo Mise a jour du repo existant...
+    cd /d "%DEST%"
+    git pull origin main
+)
+
+echo.
+echo === Terminee le %date% a %time% ===
+pause
+'''
+        st.download_button(
+            "⬇️ Script Windows de sync auto (.bat)",
+            data=sync_script.encode("utf-8"),
+            file_name="sync_lodgepro.bat",
+            mime="application/x-bat",
+            use_container_width=True,
+        )
+        st.caption("💡 À placer sur ton bureau, double-clique pour synchroniser")
+
+    with st.expander("ℹ️ Comment utiliser le script de sync auto"):
+        st.markdown("""
+        **Première installation (une seule fois) :**
+
+        1. Télécharge le script `sync_lodgepro.bat` (bouton ci-dessus)
+        2. Place-le sur ton **Bureau Windows**
+        3. Vérifie que **Git est installé** sur ton PC ([git-scm.com](https://git-scm.com/download/win))
+        4. Double-clique sur `sync_lodgepro.bat`
+        5. Au premier lancement : il clone le repo dans `D:\\LODGEPRO\\Scripts github`
+        6. Aux lancements suivants : il met à jour (git pull) avec les derniers changements
+
+        **Automatiser (optionnel) :**
+
+        1. Ouvre le **Planificateur de tâches Windows**
+        2. Crée une tâche qui lance `sync_lodgepro.bat` tous les jours à 18h00
+        3. Comme ça ta copie locale est TOUJOURS à jour
+
+        **Avantage :**
+
+        Tu auras toujours une copie complète et à jour de l'app sur ton disque D:,
+        même si GitHub ou Supabase ont un problème.
+        """)
+
+    st.divider()
     st.markdown("### 📅 Bonnes pratiques")
     st.markdown("""
     - ✅ **Sauvegarde auto quotidienne** → active, tourne tous les jours à 3h
