@@ -3,14 +3,16 @@ pages/dashboard.py
 ───────────────────────────────────────────────
 Tableau de bord Vacances-Locations PRO
 
+Respect du système d'authentification :
+  • Admin (Charley, is_admin=True)        → voit TOUTES les propriétés
+  • Propriétaire déverrouillé (ex: Le Turenne) → voit UNIQUEMENT ses propriétés
+  • Pas connecté                               → message d'invitation
+
 Corrections appliquées :
-  • force_refresh=True sur les lectures de propriétés
-    → plus de « ? » à la place du nom de propriété.
-  • taux d'occupation plafonné à 100 %
-    → plus de 215 % absurde.
-  • Bandeau arrivées = veille uniquement, disparait le jour J.
-  • Gère correctement le fait que fetch_reservations.fetch_all()
-    renvoie DÉJÀ un DataFrame nettoyé (pas une liste de dicts).
+  • Filtre par get_accessible_prop_ids() du auth_service
+  • force_refresh=True sur les lectures de propriétés (plus de « ? »)
+  • Taux d'occupation plafonné à 100 %
+  • Gère le fait que fetch_reservations() renvoie un DataFrame
 """
 
 from __future__ import annotations
@@ -21,8 +23,8 @@ import pandas as pd
 import streamlit as st
 
 from database.reservations_repo import fetch_all as fetch_reservations
-from database.proprietes_repo import fetch_all as fetch_proprietes
 from database.proprietes_repo import get_proprietes_dict
+from services.auth_service import is_admin, get_accessible_prop_ids
 
 
 # ─────────────────────────────────────────────────────────
@@ -33,8 +35,8 @@ def _fa() -> pd.DataFrame:
     """Lecture réservations → DataFrame propre.
 
     fetch_reservations() (depuis database/reservations_repo.py) renvoie
-    DÉJÀ un pd.DataFrame nettoyé par _clean_df() — on le réutilise tel quel,
-    et on NORMALISE juste les types pour le dashboard.
+    DÉJÀ un pd.DataFrame nettoyé par _clean_df() — on le réutilise tel quel
+    et on normalise juste les types pour le dashboard.
     """
     try:
         df = fetch_reservations()
@@ -45,21 +47,25 @@ def _fa() -> pd.DataFrame:
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         return pd.DataFrame()
 
-    # Si ce n'est pas un DataFrame, convertir
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df or [])
         if df.empty:
             return df
 
-    # Dates → .dt.date
     for col in ("date_arrivee", "date_depart"):
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
-    # Montants → numeric
-    for col in ("ca_brut", "commission", "frais_cb", "prix_net", "menage", "nuitees"):
+    for col in ("ca_brut", "commission", "frais_cb", "prix_net", "menage", "nuitees",
+                "prix_brut", "commissions"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # Harmoniser noms de colonnes legacy
+    if "ca_brut" not in df.columns and "prix_brut" in df.columns:
+        df["ca_brut"] = df["prix_brut"]
+    if "commission" not in df.columns and "commissions" in df.columns:
+        df["commission"] = df["commissions"]
 
     # Calculer nuitées si manquantes
     if "nuitees" in df.columns and "date_arrivee" in df.columns and "date_depart" in df.columns:
@@ -76,6 +82,21 @@ def _euro(x) -> str:
         return f"{float(x):,.0f} €".replace(",", " ")
     except Exception:
         return "0 €"
+
+
+def _get_authorized_props() -> dict:
+    """Retourne {id: nom} des propriétés que l'utilisateur courant peut voir.
+
+    • Admin → toutes les propriétés actives
+    • Propriétaire → uniquement les propriétés déverrouillées
+    """
+    all_props = get_proprietes_dict(force_refresh=True)
+    if is_admin():
+        return all_props
+    allowed = get_accessible_prop_ids()
+    if allowed is None:
+        return all_props  # admin par défaut
+    return {pid: nom for pid, nom in all_props.items() if pid in allowed}
 
 
 # ─────────────────────────────────────────────────────────
@@ -101,23 +122,27 @@ def _bandeau_arrivees(df: pd.DataFrame, props: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────
-# Vue admin : tableau récapitulatif des propriétés
+# Vue : tableau récapitulatif des propriétés (admin OU multi-props)
 # ─────────────────────────────────────────────────────────
 
-def _show_admin_overview() -> None:
-    st.subheader("Vue d'ensemble — toutes propriétés")
+def _show_overview(props: dict) -> None:
+    st.subheader("Vue d'ensemble — toutes vos propriétés")
 
     df = _fa()
-    props = get_proprietes_dict(force_refresh=True)
-
     if df.empty:
         st.info("Aucune réservation enregistrée.")
         return
 
-    df = df.copy()
+    # Ne garder que les réservations des propriétés autorisées
+    df = df[df["propriete_id"].isin(props.keys())].copy()
+    if df.empty:
+        st.info("Aucune réservation enregistrée pour vos propriétés.")
+        return
+
     df["prop_nom"] = df["propriete_id"].map(props).fillna("?")
 
-    # Années disponibles
+    _bandeau_arrivees(df, props)
+
     annees = sorted(
         {d.year for d in df["date_arrivee"] if pd.notna(d)},
         reverse=True,
@@ -126,7 +151,7 @@ def _show_admin_overview() -> None:
         st.info("Aucune date d'arrivée valide dans les réservations.")
         return
 
-    annee = st.selectbox("Année", annees, key="dash_admin_year")
+    annee = st.selectbox("Année", annees, key="dash_overview_year")
     df_y = df[df["date_arrivee"].apply(lambda d: pd.notna(d) and d.year == annee)]
 
     rows = []
@@ -141,7 +166,7 @@ def _show_admin_overview() -> None:
         nb_res = len(df_p)
 
         taux_brut = nuitees / 365 * 100 if nuitees else 0
-        taux = min(100.0, taux_brut)  # plafonné à 100 %
+        taux = min(100.0, taux_brut)
         rev_nuit = prix_net / nuitees if nuitees else 0
 
         rows.append({
@@ -181,11 +206,10 @@ def _show_admin_overview() -> None:
 
 
 # ─────────────────────────────────────────────────────────
-# Vue propriétaire : KPIs d'une seule propriété
+# Vue : KPIs d'une seule propriété
 # ─────────────────────────────────────────────────────────
 
-def _show_single_property(prop_id: int) -> None:
-    props = get_proprietes_dict(force_refresh=True)
+def _show_single_property(prop_id: int, props: dict) -> None:
     prop_nom = props.get(prop_id, f"Propriété #{prop_id}")
 
     df = _fa()
@@ -255,24 +279,36 @@ def show() -> None:
     except Exception:
         pass
 
-    auth = st.session_state.get("auth_properties", [])
-    is_admin = st.session_state.get("is_admin", False)
+    # Propriétés auxquelles l'utilisateur courant a accès
+    authorized = _get_authorized_props()
 
-    props = get_proprietes_dict(force_refresh=True)
+    if not authorized:
+        st.warning("🔒 Aucune propriété accessible — déverrouillez-en une dans la sidebar.")
+        return
 
-    if is_admin or (isinstance(auth, list) and len(auth) > 1):
-        _show_admin_overview()
-    else:
-        prop_id = (
-            auth[0] if isinstance(auth, list) and auth
-            else st.session_state.get("propriete_id")
-            or st.session_state.get("prop_id")
+    # Admin → vue d'ensemble de toutes les propriétés
+    if is_admin():
+        _show_overview(authorized)
+        return
+
+    # Propriétaire avec plusieurs propriétés → vue d'ensemble (filtrée)
+    if len(authorized) > 1:
+        # Choix dans la sidebar : toutes ou une en particulier
+        choix = st.sidebar.selectbox(
+            f"Propriété ({len(authorized)} accessible{'s' if len(authorized)>1 else ''})",
+            ["Toutes"] + list(authorized.values()),
+            key="dash_prop_filter",
         )
-        if prop_id is None or prop_id == 0:
-            # Si pas de propriété précise, afficher la vue admin
-            _show_admin_overview()
-            return
-        _show_single_property(prop_id)
+        if choix == "Toutes":
+            _show_overview(authorized)
+        else:
+            prop_id = next(pid for pid, nom in authorized.items() if nom == choix)
+            _show_single_property(prop_id, authorized)
+        return
+
+    # Propriétaire avec UNE SEULE propriété → vue détaillée directe
+    prop_id = list(authorized.keys())[0]
+    _show_single_property(prop_id, authorized)
 
 
 if __name__ == "__main__":
