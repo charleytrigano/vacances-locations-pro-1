@@ -23,7 +23,7 @@ import database.reservations_repo as repo
 PLATEFORMES = ["Booking", "Airbnb", "Direct", "Abritel", "Fermeture"]
 
 COLONNES_AFFICHAGE = [
-    "id", "nom_client", "plateforme", "date_arrivee", "date_depart",
+    "id", "propriete_nom", "nom_client", "plateforme", "date_arrivee", "date_depart",
     "nuitees", "prix_brut", "commissions", "prix_net",
     "menage", "taxes_sejour", "paye", "statut_paiement", "pays"
 ]
@@ -65,6 +65,11 @@ def _show_liste():
     if df.empty:
         st.warning("Aucune réservation disponible pour vos propriétés.")
         return
+
+    # Ajouter le NOM de la propriété pour affichage
+    _props_all = get_proprietes_dict()
+    df = df.copy()
+    df["propriete_nom"] = df["propriete_id"].map(_props_all).fillna("—")
 
     with st.expander("🔍 Filtres", expanded=True):
         # Recherche par nom — en premier, bien visible
@@ -114,6 +119,8 @@ def _show_liste():
         use_container_width=True,
         hide_index=True,
         column_config={
+            "propriete_nom": st.column_config.TextColumn("🏠 Propriété", width="medium"),
+            "nom_client":  st.column_config.TextColumn("Client"),
             "prix_brut":   st.column_config.NumberColumn("Prix brut",    format="%.2f €"),
             "prix_net":    st.column_config.NumberColumn("Prix net",     format="%.2f €"),
             "commissions": st.column_config.NumberColumn("Commissions",  format="%.2f €"),
