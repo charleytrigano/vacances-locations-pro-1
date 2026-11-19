@@ -1,17 +1,23 @@
 """
-Page Sauvegarde — Export complet des données en CSV/Excel.
+Page Sauvegarde — Export complet des données + historique des backups auto.
 Admin uniquement.
 """
-import streamlit as st
-import pandas as pd
+from __future__ import annotations
+
 import io
-from datetime import date
+import json
+import zipfile
+from datetime import date, datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
 from database.supabase_client import get_supabase
 
 
 def show():
     st.title("💾 Sauvegarde des données")
-    st.caption("Exportez toutes vos données en cas de besoin. À faire régulièrement.")
 
     if not st.session_state.get("is_admin", False):
         st.error("⛔ Accès réservé à l'administrateur.")
@@ -24,22 +30,59 @@ def show():
 
     today = date.today().strftime("%Y%m%d")
 
-    st.info("💡 Cliquez sur chaque bouton pour télécharger les données correspondantes. "
-            "Conservez ces fichiers sur votre disque dur ou Google Drive.")
+    # ═════════════════════════════════════════════════════════════════════
+    # SECTION 1 — Backups automatiques quotidiens (GitHub Actions)
+    # ═════════════════════════════════════════════════════════════════════
+    st.subheader("🤖 Sauvegardes automatiques quotidiennes")
+    st.caption("Un backup complet de la base est créé tous les jours à 3h du matin "
+               "et stocké dans ton repo GitHub. Historique conservé : 30 jours.")
+
+    _show_auto_backups()
 
     st.divider()
 
-    # ── Export par table ──────────────────────────────────────────────────────
+    # ═════════════════════════════════════════════════════════════════════
+    # SECTION 2 — Backup complet instantané (ZIP à télécharger)
+    # ═════════════════════════════════════════════════════════════════════
+    st.subheader("📦 Backup complet instantané")
+    st.caption("Télécharge toute la base en un seul fichier ZIP (CSV + JSON par table). "
+               "À faire avant une modification risquée ou pour archivage local.")
+
+    if st.button("⬇️ Générer et télécharger le backup ZIP maintenant",
+                 type="primary", use_container_width=True):
+        with st.spinner("Génération du backup complet..."):
+            zip_bytes = _generate_full_backup_zip(sb)
+            if zip_bytes:
+                st.download_button(
+                    f"📥 Télécharger vlp_backup_{today}.zip",
+                    data=zip_bytes,
+                    file_name=f"vlp_backup_{today}.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+                st.success(f"✅ Backup prêt ({len(zip_bytes) // 1024} Ko)")
+
+    st.divider()
+
+    # ═════════════════════════════════════════════════════════════════════
+    # SECTION 3 — Export table par table (CSV ou Excel)
+    # ═════════════════════════════════════════════════════════════════════
+    st.subheader("📊 Export table par table")
+    st.caption("Télécharge une seule table en CSV ou toutes en Excel.")
+
     tables = [
         ("reservations",     "📋 Réservations",       "reservations"),
         ("proprietes",       "🏠 Propriétés",          "proprietes"),
-        ("frais_deductibles","🧾 Frais déductibles",   "frais"),
         ("avis",             "⭐ Avis / Livre d'or",   "avis"),
-        ("profiles",         "👥 Utilisateurs",        "profiles"),
-        ("propriete_access", "🔐 Accès propriétés",    "acces"),
-        ("tarifs_saison",    "💶 Tarifs",              "tarifs"),
-        ("message_templates","📧 Modèles messages",    "templates"),
-        ("chat_messages",    "💬 Messages chat",       "chat"),
+        ("tarifs",           "💶 Tarifs",              "tarifs"),
+        ("templates_messages","📧 Modèles messages",   "templates"),
+        ("messages",         "💬 Messages",            "messages"),
+        ("factures",         "🧾 Factures",            "factures"),
+        ("employes_menage",  "🧹 Employés ménage",    "employes"),
+        ("taches_menage",    "🧹 Tâches ménage",      "taches"),
+        ("pointages_menage", "🕒 Pointages",           "pointages"),
+        ("evenements",       "🎪 Événements",          "evenements"),
+        ("utilisateurs",     "👥 Utilisateurs",        "utilisateurs"),
         ("journal_connexions","📋 Journal connexions", "journal"),
     ]
 
@@ -47,33 +90,30 @@ def show():
     for i, (table, label, fname) in enumerate(tables):
         col = col1 if i % 2 == 0 else col2
         with col:
-            with st.container():
-                st.markdown(f"**{label}**")
-                try:
-                    data = sb.table(table).select("*").execute().data or []
-                    nb   = len(data)
-                    if nb == 0:
-                        st.caption(f"Aucune donnée")
-                    else:
-                        df  = pd.DataFrame(data)
-                        csv = df.to_csv(index=False).encode("utf-8-sig")
-                        st.download_button(
-                            f"⬇️ {nb} lignes",
-                            data=csv,
-                            file_name=f"vlp_{fname}_{today}.csv",
-                            mime="text/csv",
-                            key=f"dl_{table}",
-                            use_container_width=True
-                        )
-                except Exception as e:
-                    st.caption(f"Erreur: {e}")
+            try:
+                data = sb.table(table).select("*").execute().data or []
+                nb = len(data)
+                if nb == 0:
+                    st.caption(f"{label} — _vide_")
+                else:
+                    df = pd.DataFrame(data)
+                    csv = df.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        f"⬇️ {label} ({nb})",
+                        data=csv,
+                        file_name=f"vlp_{fname}_{today}.csv",
+                        mime="text/csv",
+                        key=f"dl_{table}",
+                        use_container_width=True,
+                    )
+            except Exception:
+                pass  # table inexistante, on ignore
 
     st.divider()
 
     # ── Export TOUT en Excel ──────────────────────────────────────────────────
-    st.subheader("📦 Export complet en Excel (toutes les tables)")
-    if st.button("⬇️ Télécharger le fichier Excel complet", type="primary",
-                  use_container_width=True):
+    if st.button("⬇️ Export complet au format Excel (.xlsx)",
+                 use_container_width=True):
         with st.spinner("Génération du fichier Excel..."):
             try:
                 buf = io.BytesIO()
@@ -85,25 +125,111 @@ def show():
                                 pd.DataFrame(data).to_excel(
                                     writer, sheet_name=fname[:31], index=False
                                 )
-                        except: pass
+                        except Exception:
+                            pass
                 buf.seek(0)
                 st.download_button(
-                    "📥 Télécharger vacances_locations_pro_backup.xlsx",
+                    f"📥 Télécharger vlp_backup_{today}.xlsx",
                     data=buf.getvalue(),
-                    file_name=f"vlp_backup_complet_{today}.xlsx",
+                    file_name=f"vlp_backup_{today}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    use_container_width=True
+                    use_container_width=True,
                 )
                 st.success("✅ Fichier Excel prêt !")
             except Exception as e:
                 st.error(f"❌ Erreur : {e}")
 
     st.divider()
-    st.markdown("### 📅 Recommandations")
+    st.markdown("### 📅 Bonnes pratiques")
     st.markdown("""
-    - **Hebdomadaire** : Export Réservations (les données les plus importantes)
-    - **Mensuel** : Export complet Excel
-    - **Avant chaque mise à jour** : Export complet Excel
-    - **Stockage** : Google Drive, Dropbox, ou disque dur externe
+    - ✅ **Sauvegarde auto quotidienne** → active, tourne tous les jours à 3h
+    - 💾 **Avant toute mise à jour risquée** → clique sur « Backup complet ZIP maintenant »
+    - 📥 **Mensuel** → télécharge l'Excel complet et stocke-le sur Google Drive/OneDrive
+    - 🔒 **En cas de perte de la base** → tous les backups sont dans `/backups/` sur GitHub
     """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _generate_full_backup_zip(sb) -> bytes | None:
+    """Génère un ZIP en mémoire avec toutes les tables en CSV + JSON."""
+    tables_to_backup = [
+        "proprietes", "reservations", "avis", "factures",
+        "messages", "tarifs", "templates_messages",
+        "utilisateurs", "journal_connexions", "evenements",
+        "employes_menage", "taches_menage", "pointages_menage",
+        "employe_proprietes", "prospects_demo", "sessions_actives",
+        "baremes_fiscaux", "contrats", "chat_messages",
+    ]
+
+    buf = io.BytesIO()
+    manifest = {
+        "date": date.today().isoformat(),
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "tables": {},
+    }
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for table in tables_to_backup:
+            try:
+                data = sb.table(table).select("*").execute().data or []
+                if data:
+                    # CSV
+                    df = pd.DataFrame(data)
+                    zf.writestr(f"csv/{table}.csv",
+                                "﻿" + df.to_csv(index=False))
+                    # JSON
+                    zf.writestr(f"json/{table}.json",
+                                json.dumps(data, ensure_ascii=False,
+                                           indent=2, default=str))
+                manifest["tables"][table] = len(data)
+            except Exception as e:
+                manifest["tables"][table] = f"ERROR: {e}"
+
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2, default=str))
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _show_auto_backups() -> None:
+    """Liste les backups automatiques présents dans /backups/ du repo."""
+    backups_dir = Path(__file__).parent.parent / "backups"
+
+    if not backups_dir.exists():
+        st.info("📭 Aucune sauvegarde automatique encore disponible. "
+                "Le premier backup aura lieu demain à 3h du matin.")
+        return
+
+    # Liste des sous-dossiers = dates
+    subdirs = sorted(
+        [d for d in backups_dir.iterdir() if d.is_dir()],
+        reverse=True,
+    )
+
+    if not subdirs:
+        st.info("📭 Aucune sauvegarde automatique encore disponible.")
+        return
+
+    st.success(f"✅ **{len(subdirs)}** sauvegarde(s) automatique(s) dans l'historique "
+               f"(dernière : **{subdirs[0].name}**)")
+
+    # Afficher les 10 plus récentes dans un tableau
+    rows = []
+    for d in subdirs[:10]:
+        zip_files = list(d.glob("*.zip"))
+        if zip_files:
+            zf = zip_files[0]
+            size_ko = zf.stat().st_size // 1024
+            rows.append({
+                "Date":    d.name,
+                "Fichier": zf.name,
+                "Taille":  f"{size_ko} Ko",
+            })
+
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.caption("💡 Pour télécharger un backup, va dans GitHub → `/backups/<date>/` "
+                   "et clique sur le fichier .zip.")

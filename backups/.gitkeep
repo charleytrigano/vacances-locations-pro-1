@@ -1,0 +1,4 @@
+# Ce dossier contient les sauvegardes automatiques quotidiennes de Supabase.
+# Format : backups/YYYY-MM-DD/vlp_backup_YYYY-MM-DD.zip
+# Rétention : 30 jours (les plus anciens sont supprimés automatiquement)
+# Généré par : .github/workflows/backup_supabase.yml

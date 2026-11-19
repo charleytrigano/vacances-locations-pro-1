@@ -1,0 +1,48 @@
+name: Sauvegarde quotidienne Supabase
+
+on:
+  schedule:
+    # Tous les jours à 02:00 UTC (= 03:00 Paris en hiver, 04:00 en été)
+    - cron: '0 2 * * *'
+  # Permet aussi de lancer manuellement depuis l'interface GitHub
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # Nécessaire pour committer les backups
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          # Récupère l'historique complet pour éviter les problèmes de push
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install supabase
+
+      - name: Export Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scripts/backup_supabase.py
+
+      - name: Commit and push backup
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backups/
+          # Ne commit que s'il y a des changements
+          if git diff --cached --quiet; then
+            echo "Aucun changement à commiter"
+          else
+            git commit -m "🤖 Backup automatique Supabase $(date -u +%Y-%m-%d)"
+            git push origin HEAD:main
+          fi
